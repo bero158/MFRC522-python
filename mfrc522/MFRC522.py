@@ -22,13 +22,18 @@
 #
 import RPi.GPIO as GPIO
 import spidev
-import signal
-import time
 import logging
-
+import time
 class MFRC522:
+    WAIT_TIME = 0.01 #originally 0.35. Value 0.05 makes cca 2% CPU Util on RPI4 for blocking reading.
     MAX_LEN = 16
+    # cards
+    PICC_ANTICOLL1 = 0x93
+    PICC_ANTICOLL2 = 0x95
+    PICC_ANTICOLL3 = 0x97
+    PICC_CT = 0x88 # Cascade Tag
 
+    # Proximity Coupling Device
     PCD_IDLE = 0x00
     PCD_AUTHENT = 0x0E
     PCD_RECEIVE = 0x08
@@ -37,10 +42,10 @@ class MFRC522:
     PCD_RESETPHASE = 0x0F
     PCD_CALCCRC = 0x03
 
+    # Proximity Integrated Circuit Card
     PICC_REQIDL = 0x26
     PICC_REQALL = 0x52
     PICC_ANTICOLL = 0x93
-    PICC_SElECTTAG = 0x93
     PICC_AUTHENT1A = 0x60
     PICC_AUTHENT1B = 0x61
     PICC_READ = 0x30
@@ -51,10 +56,12 @@ class MFRC522:
     PICC_TRANSFER = 0xB0
     PICC_HALT = 0x50
 
+    # Status
     MI_OK = 0
     MI_NOTAGERR = 1
     MI_ERR = 2
 
+    # MFRC522 Registers Addresses
     Reserved00 = 0x00
     CommandReg = 0x01
     CommIEnReg = 0x02
@@ -124,73 +131,179 @@ class MFRC522:
     Reserved34 = 0x3F
 
     serNum = []
+    def gpioSetMode(self):
+        # Set GPIO pin numbering mode if not already set
+        gpioMode = GPIO.getmode()
+        if gpioMode is None:
+            GPIO.setmode(self.pin_mode)
+        else:
+            self.pin_mode = gpioMode
 
-    def __init__(self, bus=0, device=0, spd=1000000, pin_mode=10, pin_rst=-1, debugLevel='WARNING'):
+    def __init__(self, bus=0, device=0, spd=1000000, pin_mode=GPIO.BOARD, pin_rst=-1, debugLevel='WARNING'):
+        """
+        Initializes the MFRC522 RFID reader.
+
+        Args:
+        - bus (int): the SPI bus number (default 0).
+        - device (int): the SPI device number (default 0).
+        - spd (int): the SPI bus speed (default 1000000).
+        - pin_mode (int): the GPIO pin numbering mode (default 10).
+        - pin_rst (int): the GPIO pin number for reset (default -1, which sets the pin based on pin_mode).
+        - debugLevel (str): the logging debug level (default 'WARNING').
+        """
+        # Initialize SPI communication
         self.spi = spidev.SpiDev()
         self.spi.open(bus, device)
         self.spi.max_speed_hz = spd
+        self.pin_mode = pin_mode
 
+        # Initialize logger for debugging
         self.logger = logging.getLogger('mfrc522Logger')
         self.logger.addHandler(logging.StreamHandler())
         level = logging.getLevelName(debugLevel)
         self.logger.setLevel(level)
+        self.pin_rst = pin_rst
+        self.gpioSetMode()
 
-        gpioMode = GPIO.getmode()
-        
-        if gpioMode is None:
-            GPIO.setmode(pin_mode)
-        else:
-            pin_mode = gpioMode
-            
+        # Set reset pin based on pin_mode if not specified
         if pin_rst == -1:
-            if pin_mode == 11:
-                pin_rst = 15
+            if self.pin_mode == GPIO.BCM:
+                self.pin_rst = 25
             else:
-                pin_rst = 22
-            
-        GPIO.setup(pin_rst, GPIO.OUT)
-        GPIO.output(pin_rst, 1)
-        self.MFRC522_Init()
+                self.pin_rst = 22
 
-    def MFRC522_Reset(self):
-        self.Write_MFRC522(self.CommandReg, self.PCD_RESETPHASE)
+        self.StopAuth = self.StopCrypto1
+        # Set up reset pin and initialize MFRC522 RFID reader
+        GPIO.setup(self.pin_rst, GPIO.OUT)
+        GPIO.output(self.pin_rst, 1)
+        self.Init()
+        
+    def Reset(self):
+        """
+        Reset the MFRC522 chip by writing the PCD_RESETPHASE command to the CommandReg register.
 
-    def Write_MFRC522(self, addr, val):
+        This function sends the PCD_RESETPHASE command to the MFRC522 chip, which resets its internal state
+        and clears all registers. After the reset, the chip is ready to accept new commands.
+        """
+
+        self.WriteReg(self.CommandReg, self.PCD_RESETPHASE)
+
+    def WriteReg(self, addr, val):
+        """
+        Write a value to a register of the MFRC522 chip using SPI communication.
+
+        This method sends a write command to the MFRC522 chip using the SPI interface, specifying the
+        register address and the value to be written.
+
+        Args:
+            :param: (int): the address of the register to write to, in the range 0x00-0xFF.
+            val (int): the value to write to the register, in the range 0x00-0xFF.
+        """
         val = self.spi.xfer2([(addr << 1) & 0x7E, val])
 
-    def Read_MFRC522(self, addr):
+    def ReadReg(self, addr):
+        """
+        Read the value of a register of the MFRC522 chip using SPI communication.
+
+        This method sends a read command to the MFRC522 chip using the SPI interface, specifying the
+        register address.
+
+        Args:
+            addr (int): the address of the register to read from, in the range 0x00-0xFF.
+
+        Returns:
+            The value read from the register.
+        """
         val = self.spi.xfer2([((addr << 1) & 0x7E) | 0x80, 0])
         return val[1]
 
-    def Close_MFRC522(self):
-        self.spi.close()
-        GPIO.cleanup()
+    def Close(self):
+        """
+        Close the MFRC522 chip by releasing the SPI interface and cleaning up the GPIO.
+
+        This method closes the SPI interface used to communicate with the MFRC522 chip, releasing any
+        system resources associated with it. It also calls the `GPIO.cleanup()` function to release
+        any GPIO pins that were used to control the chip.
+        """
+        self.spi.close() 
+        GPIO.cleanup(self.pin_rst)
 
     def SetBitMask(self, reg, mask):
-        tmp = self.Read_MFRC522(reg)
-        self.Write_MFRC522(reg, tmp | mask)
+        """
+        Sets specific bits in a register of an MFRC522 RFID module
+        by performing a bitwise OR operation with the provided mask.
+
+        Args:
+            reg (int): the register to modify
+            mask (int): the bit mask to apply
+        """
+        # Read the current value of the register
+        tmp = self.ReadReg(reg)
+
+        # Set the desired bits using a bitwise OR operation
+        self.WriteReg(reg, tmp | mask)
 
     def ClearBitMask(self, reg, mask):
-        tmp = self.Read_MFRC522(reg)
-        self.Write_MFRC522(reg, tmp & (~mask))
+        """
+        Clears specific bits in a register of an MFRC522 RFID module
+        by performing a bitwise AND operation with the complement of the provided mask.
+
+        Args:
+            reg (int): the register to modify
+            mask (int): the bit mask to clear
+        """
+        # Read the current value of the register
+        tmp = self.ReadReg(reg)
+
+        # Clear the desired bits using a bitwise AND operation
+        self.WriteReg(reg, tmp & (~mask))
 
     def AntennaOn(self):
-        temp = self.Read_MFRC522(self.TxControlReg)
-        if (~(temp & 0x03)):
+        """
+        Turns on the antenna of an MFRC522 RFID module by setting the TxControlReg register.
+
+        If the antenna is already on, this method does nothing.
+
+        """
+        # Read the current value of the TxControlReg register
+        temp = self.ReadReg(self.TxControlReg)
+
+        # Check if the least significant two bits are already set
+        if (temp & 0x03) != 0x03:
+            # If not, turn on the antenna by setting the bits using a bit mask
             self.SetBitMask(self.TxControlReg, 0x03)
 
     def AntennaOff(self):
+        """
+        Turns off the antenna of an MFRC522 RFID module by clearing the TxControlReg register.
+
+        """
+        # Clear the least significant two bits of the TxControlReg register to turn off the antenna
         self.ClearBitMask(self.TxControlReg, 0x03)
 
     def MFRC522_ToCard(self, command, sendData):
-        backData = []
-        backLen = 0
-        status = self.MI_ERR
-        irqEn = 0x00
-        waitIRq = 0x00
-        lastBits = None
-        n = 0
+        """
+        Executes a command on the MFRC522 and communicates with the tag or card.
 
+        Args:
+            command (int): The command to execute.
+            sendData (list): A list of bytes to send to the tag or card.
+
+        Returns:
+            tuple: A tuple containing:
+                - status (int): The status of the command execution.
+                - backData (list): A list of bytes received from the tag or card.
+                - backLen (int): The length of the backData list.
+        """
+        backData = []  # List to store response data
+        backLen = 0  # Length of response data
+        status = self.MI_ERR  # Default status
+        irqEn = 0x00  # Interrupt request enable flag
+        waitIRq = 0x00  # Wait for interrupt request flag
+        lastBits = None  # Number of valid bits in last byte
+        n = 0  # Number of bytes received
+
+        # Set interrupt request and wait flags based on command
         if command == self.PCD_AUTHENT:
             irqEn = 0x12
             waitIRq = 0x10
@@ -198,39 +311,50 @@ class MFRC522:
             irqEn = 0x77
             waitIRq = 0x30
 
-        self.Write_MFRC522(self.CommIEnReg, irqEn | 0x80)
+        # Enable interrupts and reset FIFO buffer
+        self.WriteReg(self.CommIEnReg, irqEn | 0x80)
         self.ClearBitMask(self.CommIrqReg, 0x80)
         self.SetBitMask(self.FIFOLevelReg, 0x80)
 
-        self.Write_MFRC522(self.CommandReg, self.PCD_IDLE)
+        # Put MFRC522 into idle state
+        self.WriteReg(self.CommandReg, self.PCD_IDLE)
 
+        # Write data to FIFO buffer
         for i in range(len(sendData)):
-            self.Write_MFRC522(self.FIFODataReg, sendData[i])
+            self.WriteReg(self.FIFODataReg, sendData[i])
 
-        self.Write_MFRC522(self.CommandReg, command)
+        # Start command execution
+        self.WriteReg(self.CommandReg, command)
 
+        # Set bit framing if command is transceive
         if command == self.PCD_TRANSCEIVE:
             self.SetBitMask(self.BitFramingReg, 0x80)
 
-        i = 2000
+        # Wait for command execution (timeout)
+        i = 700/self.WAIT_TIME #total time 700ms
         while True:
-            n = self.Read_MFRC522(self.CommIrqReg)
+            time.sleep( self.WAIT_TIME )
+            n = self.ReadReg(self.CommIrqReg)
             i -= 1
-            if ~((i != 0) and ~(n & 0x01) and ~(n & waitIRq)):
+            # Break if interrupt request received or timeout
+            if i == 0 or (n & 0x01) or (n & waitIRq):
                 break
 
+        # Clear bit framing if command is transceive
         self.ClearBitMask(self.BitFramingReg, 0x80)
 
+        # Check for errors and update status accordingly
         if i != 0:
-            if (self.Read_MFRC522(self.ErrorReg) & 0x1B) == 0x00:
+            if (self.ReadReg(self.ErrorReg) & 0x1B) == 0x00:
                 status = self.MI_OK
 
                 if n & irqEn & 0x01:
                     status = self.MI_NOTAGERR
 
+                # Read response data if command is transceive
                 if command == self.PCD_TRANSCEIVE:
-                    n = self.Read_MFRC522(self.FIFOLevelReg)
-                    lastBits = self.Read_MFRC522(self.ControlReg) & 0x07
+                    n = self.ReadReg(self.FIFOLevelReg)
+                    lastBits = self.ReadReg(self.ControlReg) & 0x07
                     if lastBits != 0:
                         backLen = (n - 1) * 8 + lastBits
                     else:
@@ -242,92 +366,172 @@ class MFRC522:
                         n = self.MAX_LEN
 
                     for i in range(n):
-                        backData.append(self.Read_MFRC522(self.FIFODataReg))
+                        backData.append(self.ReadReg(self.FIFODataReg))
             else:
                 status = self.MI_ERR
 
+        # Return response data, length, and status
         return (status, backData, backLen)
 
-    def MFRC522_Request(self, reqMode):
+    def Request(self, reqMode):
+        """
+        Sends a request command to a tag or card to initiate communication.
+
+        Args:
+            reqMode (int): The request mode to send.
+
+        Returns:
+            tuple: A tuple containing:
+                - status (int): The status of the command execution.
+                - backBits (int): The number of bits received from the tag or card.
+        """
         status = None
         backBits = None
-        TagType = []
+        TagType = [reqMode] # Append the request mode to the TagType list
 
-        self.Write_MFRC522(self.BitFramingReg, 0x07)
+        # Set the bit framing register to 0x07
+        self.WriteReg(self.BitFramingReg, 0x07)
 
-        TagType.append(reqMode)
-        (status, backData, backBits) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, TagType)
+        # Send the request to the card using the MFRC522_ToCard method
+        (status, backData, backBits) = self.MFRC522_ToCard(
+            self.PCD_TRANSCEIVE, TagType)
 
+        # If the status is not MI_OK or the back bits are not 0x10, set status to MI_ERR
         if ((status != self.MI_OK) | (backBits != 0x10)):
             status = self.MI_ERR
 
+        # Return a tuple containing the status, back bits and tag type
         return (status, backBits)
 
-    def MFRC522_Anticoll(self):
+    def Anticoll(self, anticolN = PICC_ANTICOLL1 ):
+        """
+        Sends an anticollision command/Performs an anticollision algorithm to a tag or card to prevent multiple tags from responding.
+
+        Returns:
+            tuple: A tuple containing:
+                - uid (list): The unique identifier of the tag or card.
+                - size (int): The size of the UID in bits.
+        """
         backData = []
         serNumCheck = 0
 
         serNum = []
 
-        self.Write_MFRC522(self.BitFramingReg, 0x00)
+        # Set the BitFramingReg to 0x00
+        self.WriteReg(self.BitFramingReg, 0x00)
 
-        serNum.append(self.PICC_ANTICOLL)
+        # Append the PICC_ANTICOLL command and 0x20 to the serNum list
+        serNum.append( anticolN )
         serNum.append(0x20)
 
-        (status, backData, backBits) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, serNum)
+        # Call the MFRC522_ToCard method with PCD_TRANSCEIVE command and serNum data
+        (status, backData, backBits) = self.MFRC522_ToCard(
+            self.PCD_TRANSCEIVE, serNum)
 
+        # Check if the operation was successful
         if (status == self.MI_OK):
             i = 0
+            # Check if the backData has the expected length of 5 bytes
             if len(backData) == 5:
+                # Calculate the XOR checksum of the first 4 bytes of the backData
                 for i in range(4):
                     serNumCheck = serNumCheck ^ backData[i]
+                # Check if the calculated checksum matches the 5th byte of backData
                 if serNumCheck != backData[4]:
+                    # If not, set the status to MI_ERR
                     status = self.MI_ERR
             else:
+                # If backData doesn't have 5 bytes, set the status to MI_ERR
                 status = self.MI_ERR
-
+        self.logger.debug(f"Anticoll {anticolN} {status} {bytes(backData).hex()}")
+        # Return the status and backData
         return (status, backData)
 
     def CalulateCRC(self, pIndata):
+        """
+        Calculates the CRC value for the given input data using the MFRC522 chip.
+
+        Args:
+            pIndata (list): A list of integers representing the input data for which to calculate the CRC.
+
+        Returns:
+            A list of two integers representing the calculated CRC value.
+        """
+
+        # Clear the CRC IRQ flag and set the FIFO level to maximum.
         self.ClearBitMask(self.DivIrqReg, 0x04)
         self.SetBitMask(self.FIFOLevelReg, 0x80)
 
+        # Write the input data to the FIFO.
         for i in range(len(pIndata)):
-            self.Write_MFRC522(self.FIFODataReg, pIndata[i])
+            self.WriteReg(self.FIFODataReg, pIndata[i])
 
-        self.Write_MFRC522(self.CommandReg, self.PCD_CALCCRC)
+        # Start the CRC calculation command.
+        self.WriteReg(self.CommandReg, self.PCD_CALCCRC)
+
+        # Wait for the CRC calculation to complete.
         i = 0xFF
         while True:
-            n = self.Read_MFRC522(self.DivIrqReg)
+            n = self.ReadReg(self.DivIrqReg)
             i -= 1
             if not ((i != 0) and not (n & 0x04)):
                 break
+
+        # Read the calculated CRC value from the chip.
         pOutData = []
-        pOutData.append(self.Read_MFRC522(self.CRCResultRegL))
-        pOutData.append(self.Read_MFRC522(self.CRCResultRegM))
+        pOutData.append(self.ReadReg(self.CRCResultRegL))
+        pOutData.append(self.ReadReg(self.CRCResultRegM))
         return pOutData
 
-    def MFRC522_SelectTag(self, serNum):
+    def SelectTag(self, serNum, anticolN = PICC_ANTICOLL1):
+        """
+        Selects a tag or card for communication.
+
+        Args:
+            uid (list): The unique identifier of the tag or card.
+
+        Returns:
+            int: The status of the command execution (1 or 0).
+            int: First byte of backData
+        """
+        # Initialize empty lists for the response data and the data buffer
         backData = []
         buf = []
-        buf.append(self.PICC_SElECTTAG)
+
+        # Add the command byte and tag type to the buffer
+        buf.append(anticolN)
         buf.append(0x70)
-        
-        for i in range(5):
-            buf.append(serNum[i])
 
+        # Add the serial number of the tag to the buffer
+        buf.extend(serNum[:5])
+
+        # Calculate the CRC values for the buffer and add them to the buffer
         pOut = self.CalulateCRC(buf)
-        buf.append(pOut[0])
-        buf.append(pOut[1])
+        buf.extend(pOut)
+
+        # Send the buffer to the tag and receive the response
         (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, buf)
-
+        self.logger.debug(f"SelectTag({anticolN}) {status} {bytes(backData).hex()} {backLen}")
+        # Check if the response is successful and has the expected length
         if (status == self.MI_OK) and (backLen == 0x18):
-            self.logger.debug("Size: " + str(backData[0]))
-            return backData[0]
+            return self.MI_OK
         else:
-            return 0
+            # Return 0 if the response is not successful or has an unexpected length
+            return self.MI_ERR
 
-    def MFRC522_Auth(self, authMode, BlockAddr, Sectorkey, serNum):
+    def Authenticate(self, authMode, BlockAddr, Sectorkey, serNum):
+        """
+        Authenticates a tag or card for a specific block.
+
+        Args:
+            authMode (int): The authentication mode to use.
+            blockAddr (int): The address of the block to authenticate.
+            sectorKey (list): The key of the sector to authenticate.
+            uid (list): The unique identifier of the tag or card.
+
+        Returns:
+            The status of the authentication.
+        """
         buff = []
 
         # First byte should be the authMode (A or B)
@@ -346,80 +550,156 @@ class MFRC522:
 
         # Now we start the authentication itself
         (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_AUTHENT, buff)
-
+        
         # Check if an error occurred
         if not (status == self.MI_OK):
             self.logger.error("AUTH ERROR!!")
-        if not (self.Read_MFRC522(self.Status2Reg) & 0x08) != 0:
+        if not (self.ReadReg(self.Status2Reg) & 0x08) != 0:
             self.logger.error("AUTH ERROR(status2reg & 0x08) != 0")
 
         # Return the status
         return status
 
-    def MFRC522_StopCrypto1(self):
+    def StopCrypto1(self):
+        """
+        Stops the authentication process.
+        """
         self.ClearBitMask(self.Status2Reg, 0x08)
 
-    def MFRC522_Read(self, blockAddr):
+    def ReadTag(self, blockAddr):
+        """
+        Reads data from a specific block of a RFID card.
+
+        Args:
+            blockAddr (int): The block address of the RFID card to read from.
+
+        Returns:
+            If the read is successful and the received data is of the correct length, the function returns the received data as a list of 16 bytes. If the read is unsuccessful or the received data is of incorrect length, the function returns None.
+        """
+
+        # create an array containing the READ command and the block address to be read
         recvData = []
         recvData.append(self.PICC_READ)
         recvData.append(blockAddr)
+        # calculate the CRC checksum for the command and block address
         pOut = self.CalulateCRC(recvData)
+        # append the calculated checksum to the command and block address array
         recvData.append(pOut[0])
         recvData.append(pOut[1])
-        (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, recvData)
+        # send the command and block address array to the RFID card and receive response
+        (status, backData, backLen) = self.MFRC522_ToCard(
+            self.PCD_TRANSCEIVE, recvData)
+        # if response status is not OK, print error message
         if not (status == self.MI_OK):
             self.logger.error("Error while reading!")
 
+        # if response data has length 16, print debug message and return data
         if len(backData) == 16:
             self.logger.debug("Sector " + str(blockAddr) + " " + str(backData))
             return backData
+        # if response data length is not 16, return None
         else:
             return None
 
-    def MFRC522_Write(self, blockAddr, writeData):
+    def WriteTag(self, blockAddr, writeData):
+        """
+        Writes data to a specified block address in the RFID tag.'
+
+        Args:
+            blockAddr (int): The block address where data needs to be written
+            writeData (list): A list of 16 bytes of data to be written to the block
+
+        Returns:
+            None
+        """
+
+        # The buffer to be sent to the tag for writing data
         buff = []
         buff.append(self.PICC_WRITE)
         buff.append(blockAddr)
+
+        # Calculate the CRC checksum for the buffer
         crc = self.CalulateCRC(buff)
         buff.append(crc[0])
         buff.append(crc[1])
-        (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, buff)
+
+        # Send the buffer to the tag and receive the response
+        (status, backData, backLen) = self.MFRC522_ToCard(
+            self.PCD_TRANSCEIVE, buff)
+
+        # Check if the write operation was successful or not
         if not (status == self.MI_OK) or not (backLen == 4) or not ((backData[0] & 0x0F) == 0x0A):
             status = self.MI_ERR
 
-        self.logger.debug("%s backdata &0x0F == 0x0A %s" % (backLen, backData[0] & 0x0F))
+        self.logger.debug("%s backdata &0x0F == 0x0A %s" %
+                          (backLen, backData[0] & 0x0F))
+
+        # If the initial write operation was successful, write the actual data to the tag
         if status == self.MI_OK:
             buf = []
             for i in range(16):
                 buf.append(writeData[i])
-
+            # Calculate the CRC checksum for the data to be written
             crc = self.CalulateCRC(buf)
             buf.append(crc[0])
             buf.append(crc[1])
-            (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, buf)
+            # Send the data buffer to the tag and receive the response
+            (status, backData, backLen) = self.MFRC522_ToCard(
+                self.PCD_TRANSCEIVE, buf)
+            # Check if the write operation was successful or not
             if not (status == self.MI_OK) or not (backLen == 4) or not ((backData[0] & 0x0F) == 0x0A):
                 self.logger.error("Error while writing")
+            # If the write operation was successful, log it
             if status == self.MI_OK:
                 self.logger.debug("Data written")
 
+    def Init(self):
+        """
+        Initializes the MFRC522 RFID reader by resetting it and configuring its registers.
+        """
 
-    def MFRC522_DumpClassic1K(self, key, uid):
-        for i in range(64):
-            status = self.MFRC522_Auth(self.PICC_AUTHENT1A, i, key, uid)
-            # Check if authenticated
-            if status == self.MI_OK:
-                self.MFRC522_Read(i)
-            else:
-                self.logger.error("Authentication error")
+        # Reset the MFRC522
+        self.Reset()
 
-    def MFRC522_Init(self):
-        self.MFRC522_Reset()
+        # Set the timer mode and prescaler
+        self.WriteReg(self.TModeReg, 0x8D)
+        self.WriteReg(self.TPrescalerReg, 0x3E)
+        self.WriteReg(self.TReloadRegL, 30)
+        self.WriteReg(self.TReloadRegH, 0)
 
-        self.Write_MFRC522(self.TModeReg, 0x8D)
-        self.Write_MFRC522(self.TPrescalerReg, 0x3E)
-        self.Write_MFRC522(self.TReloadRegL, 30)
-        self.Write_MFRC522(self.TReloadRegH, 0)
+        # Enable the auto-timer for transmission and set the mode
+        self.WriteReg(self.TxAutoReg, 0x40)
+        self.WriteReg(self.ModeReg, 0x3D)
 
-        self.Write_MFRC522(self.TxAutoReg, 0x40)
-        self.Write_MFRC522(self.ModeReg, 0x3D)
+        # Turn on the antenna
         self.AntennaOn()
+
+    def AnticollSelect(self, anticollN):
+        (status , uid) = self.Anticoll(anticollN)
+        if status != self.MI_OK:
+            return  None
+        if self.SelectTag(uid,anticollN) != self.MI_OK:
+            return None
+        return uid[:-1] #remove CRC
+           
+    def SelectTagSN(self):
+        valid_uid=[]
+        uid = self.AnticollSelect(self.PICC_ANTICOLL1)
+        if not uid:
+            return None
+        #check if first byte is PICC_CT
+        if uid[0] == self.PICC_CT:
+            #ok we have another type of card
+            valid_uid.extend(uid[1:])
+            uid =self.AnticollSelect(self.PICC_ANTICOLL2)
+            if not uid:
+                return None
+            #now check again if uid[0] is PICC_CT
+            if uid[0] == self.PICC_CT:
+                valid_uid.extend(uid[1:])
+                uid = self.AnticollSelect(self.PICC_ANTICOLL3)
+                if not uid:
+                    return None
+        
+        valid_uid.extend(uid)
+        return valid_uid
