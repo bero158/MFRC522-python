@@ -1,5 +1,3 @@
-# mfrc522
-
 ## Changes
 This is an extension of the original library.
 Changes:
@@ -7,6 +5,9 @@ Changes:
 - Integration with another solutions which use GPIO ports (Close() closes only RST pin)
 - Simple debouncer added for blocking ID reading
 - Timing improved for faster ID reading
+
+# mfrc522
+
 
 A python library to read/write RFID tags via the budget MFRC522 RFID module.
 
