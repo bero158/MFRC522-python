@@ -10,9 +10,9 @@ class SimpleMFRC522:
     READER = None
     debouncer = None
 
-    # KEY = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+    KEY = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
     # KEY = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]
-    KEY = [0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5]
+    # KEY = [0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5]
     
     BLOCK_ADDRS = [8, 9, 10]
 
@@ -63,15 +63,12 @@ class SimpleMFRC522:
             return None, None
         status = self.READER.Authenticate(
             self.READER.PICC_AUTHENT1A, 11, self.KEY, uid)
-        data = []
         text_read = ''
         if status == self.READER.MI_OK:
             for block_num in self.BLOCK_ADDRS:
                 block = self.READER.ReadTag(block_num)
                 if block:
-                    data += block
-                if data:
-                    text_read = ''.join(chr(i) for i in data)
+                    text_read += bytes(block).decode("ascii")
         self.READER.StopCrypto1()
         return uid, text_read
 

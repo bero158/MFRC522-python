@@ -11,3 +11,6 @@
 /build/
 # deploy scripts
 /*.sh
+
+# environment
+/.venv/
