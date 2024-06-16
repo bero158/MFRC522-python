@@ -20,6 +20,7 @@
 #    You should have received a copy of the GNU Lesser General Public License
 #    along with MFRC522-Python.  If not, see <http://www.gnu.org/licenses/>.
 #
+import pdb
 import RPi.GPIO as GPIO
 import spidev
 import logging
@@ -511,7 +512,7 @@ class MFRC522:
 
         # Send the buffer to the tag and receive the response
         (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, buf)
-        self.logger.debug(f"SelectTag({anticolN}) {status} {bytes(backData).hex()} {backLen}")
+        self.logger.debug(f"SelectTag({anticolN}) {bytes(serNum).hex()} {status} {bytes(backData).hex()}")
         # Check if the response is successful and has the expected length
         if (status == self.MI_OK) and (backLen == 0x18):
             return self.MI_OK
@@ -541,12 +542,11 @@ class MFRC522:
         buff.append(BlockAddr)
 
         # Now we need to append the authKey which usually is 6 bytes of 0xFF
-        for i in range(len(Sectorkey)):
-            buff.append(Sectorkey[i])
+        buff.extend(Sectorkey)
 
-        # Next we append the first 4 bytes of the UID
-        for i in range(4):
-            buff.append(serNum[i])
+        # Next we append the last 4 bytes of the UID
+        # pdb.set_trace()
+        buff.extend(serNum[-4:])
 
         # Now we start the authentication itself
         (status, backData, backLen) = self.MFRC522_ToCard(self.PCD_AUTHENT, buff)
