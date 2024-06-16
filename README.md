@@ -8,7 +8,7 @@ Changes:
 
 # mfrc522
 
-!!! Currently read & write is not woking for cascade tags. I'm investigating why.
+!!! Currently read & write is not woking for cascade tags. I'm investigating the reason. Reading uid works well. 
 
 A python library to read/write RFID tags via the budget MFRC522 RFID module.
 
